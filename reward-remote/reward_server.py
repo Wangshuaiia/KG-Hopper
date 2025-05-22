@@ -281,13 +281,13 @@ class MathRuleProxy:
                 finished_lst.append("1")
 
             format_punishment=False
-            count_1 = solutions[i].count("<|begin_of_documents|>\n")
-            count_2 = solutions[i].count("<|end_of_documents|>\n\n")
-            count_3 = solutions[i].count("<|begin_of_query|>")
-            count_4 = solutions[i].count("<|end_of_query|>")
-            count_5 = solutions[i].count("<|begin_of_documents|>")
-            count_6 = solutions[i].count("<|end_of_documents|>")
-            count_7 = solutions[i].count("<|begin_of_documents|>\n(1)")
+            count_1 = solutions[i].count("<searched_triples>\n")
+            count_2 = solutions[i].count("</searched_triples>\n\n")
+            count_3 = solutions[i].count("<search>")
+            count_4 = solutions[i].count("</search>")
+            count_5 = solutions[i].count("<searched_triples>")
+            count_6 = solutions[i].count("</searched_triples>")
+            count_7 = solutions[i].count("<searched_triples>\n(1)")
 
             if count_1 == count_2 == count_3 == count_4 == count_5 == count_6 == count_7:
                 pass
@@ -325,7 +325,7 @@ class MathRuleProxy:
             if answer_len > 10:
                 format_punishment=True
 
-            modified_solution = re.sub(r'<\|begin_of_documents\|>.*?<\|end_of_documents\|>', '', solutions[i], flags=re.DOTALL)
+            modified_solution = re.sub(r'<searched_triples>>.*?</searched_triples>>', '', solutions[i], flags=re.DOTALL)
             have_chinese = any('\u4e00' <= char <= '\u9fff' for char in modified_solution)
             if have_chinese:
                 format_punishment=True

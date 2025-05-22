@@ -40,8 +40,8 @@ base_prompts = {
     "default": """The User asks a question, and the Assistant solves it.
 The Assistant first thinks about the reasoning process in the mind and then provides the User with the final answer.
 The output format of reasoning process and final answer are enclosed within <think> </think> and <answer> </answer> tags, respectively, i.e., "<think> reasoning process here </think>\n\n<answer> final answer here </answer>".
-During the thinking process, the Assistant can perform searching for uncertain knowledge from a knowledge graph if necessary with the format of "<|begin_of_query|> search query (only entity) here <|end_of_query|>". **A query must involve only a single triple**.
-Then, the system will provide the Assistant with helpful information with the format of "<|begin_of_documents|> ...search results... <|end_of_documents|>".\n\nUser:{question}\nAssistant: <think>""",
+During the thinking process, the Assistant can perform searching for uncertain knowledge from a knowledge graph if necessary with the format of "<search> search query (only entity) here </search>". **A query must involve only a single triple**.
+Then, the system will provide the Assistant with helpful information with the format of "<searched_triples> ...search results... </searched_triples>".\n\nUser:{question}\nAssistant: <think>""",
     "slot_filling": """The User give a sentence with a slot [SEP], and the Assistant fill the slot.
 ...\n\nUser:{question}\nAssistant: <think>""",
     "fact_checking": """The User gives a claim, and the Assistant verifies the truthfulness of the claim.
@@ -93,7 +93,7 @@ def main(data_path_qs_list):
                 topic_entity_list = list(topic_entity.values())
 
                 prompt_think = generate_prompt(data_path, question)
-                stop_tokens = ["<|im_end|>", "<|endoftext|>", "<|end_of_query|>", "</answer>"]
+                stop_tokens = ["<|im_end|>", "<|endoftext|>", "</search>", "</answer>"]
                 sampling_params = SamplingParams(temperature=args.temp, top_p=0.95, max_tokens=512, stop=stop_tokens)
 
                 for _ in range(10):
@@ -113,11 +113,11 @@ def main(data_path_qs_list):
                             f.write(json.dumps(result) + "\n")
                         break
 
-                    elif "<|begin_of_query|>" in generated_text and stop_reason == "<|end_of_query|>":
-                        query = generated_text.split("<|begin_of_query|>")[-1].split("<|end_of_query|>")[0].strip()
+                    elif "<search>" in generated_text and stop_reason == "</search>":
+                        query = generated_text.split("<search>")[-1].split("</search>")[0].strip()
                         entity = judge_entity(query) or topic_entity_list[0]
                         doc_content = '\n'.join(wiki_retrieval(question, entity))
-                        prompt_think += f"<|end_of_query|>\n\n<|begin_of_documents|>\n{doc_content}<|end_of_documents|>\n\n"
+                        prompt_think += f"</search>\n\n<searched_triples>\n{doc_content}</searched_triples>\n\n"
                     else:
                         result = {
                             "question": question,
