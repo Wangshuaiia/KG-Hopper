@@ -347,6 +347,29 @@ def entity_prune(total_entities_id, total_relations, total_candidates, total_top
     return True, cluster_chain_of_entities, entities_id, relations, heads
 
 
+def wiki_retrieval(question, input_entity):
+    pre_relations = []
+    pre_heads= [-1] * len(input_entity)
+    results = []
+    retrieve_relations_with_scores = relation_search_prune(topic_entity[input_entity], input_entity, pre_relations, pre_heads[-1], question)
+    for entity in retrieve_relations_with_scores:
+        if entity['head']:
+            entity_candidates_id = entity_search(entity['entity'], entity['relation'], True)
+        else:
+            entity_candidates_id = entity_search(entity['entity'], entity['relation'], False)
+        scores, entity_candidates, entity_candidates_id = entity_score(question, entity_candidates_id, entity['score'], entity['relation'])
+        if len(entity_candidates) == 0:
+            continue
+        else:
+            if entity['head']:
+                for entity_id in entity_candidates_id:
+                    results.append((entity['relation'], entity['entity'], id2entity_name_or_type(entity_id)))
+            else:
+                for entity_id in entity_candidates_id:
+                    results.append((id2entity_name_or_type(entity_id), entity['relation'], entity['entity']))
+    return results
+
+
 def reasoning(question, cluster_chain_of_entities, args, context=[], sub_question=''):
     if sub_question:
         prompt = prompt_evaluate + sub_question
