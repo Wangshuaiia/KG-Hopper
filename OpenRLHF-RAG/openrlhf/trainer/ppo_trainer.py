@@ -1,5 +1,6 @@
 import os
 import os.path
+import random
 from abc import ABC
 from typing import Any, Callable, Dict, List, Optional
 
@@ -180,6 +181,29 @@ class PPOTrainer(ABC):
             log_dir = os.path.join(self.strategy.args.use_tensorboard, strategy.args.wandb_run_name)
             self._tensorboard = SummaryWriter(log_dir=log_dir)
 
+    def _history_resampling(self, args, episode, step, prompts):
+        """Paper III-D: from episode `--history_resampling_episode` on, one-hop questions (hops == 1 in the
+        prompt file) are replaced by randomly drawn multi-hop ones. Replacing rather than dropping keeps the
+        batch size equal on every rank."""
+        start = getattr(args, "history_resampling_episode", None)
+        if start is None or episode < start:
+            return prompts
+        if not hasattr(self, "_one_hop_idx"):
+            from kghopper.data import load_samples
+
+            self._one_hop_idx = set()
+            for path in str(args.prompt_data).split(","):
+                self._one_hop_idx |= {s["idx"] for s in load_samples(path.strip()) if s.get("hops") == 1}
+            self._multi_hop_prompts = [p for p in self.prompts_dataloader.dataset.prompts
+                                       if p.split("<|idx_prompt_split|>", 1)[0] not in self._one_hop_idx]
+            self.strategy.print(f"history resampling from episode {start}: {len(self._one_hop_idx)} one-hop prompts "
+                                f"replaced by draws from {len(self._multi_hop_prompts)} multi-hop prompts")
+        if not self._multi_hop_prompts:
+            return prompts
+        rng = random.Random(f"{args.seed}-{episode}-{step}-{self.strategy.get_rank()}")
+        return [rng.choice(self._multi_hop_prompts) if p.split("<|idx_prompt_split|>", 1)[0] in self._one_hop_idx else p
+                for p in prompts]
+
     def fit(
         self,
         args,
@@ -240,6 +264,7 @@ class PPOTrainer(ABC):
             )
 
             for rand_prompts in self.prompts_dataloader:
+                rand_prompts = self._history_resampling(args, episode, steps, rand_prompts)
                 for i, experience in enumerate(
                     self.experience_maker.make_experience_list(rand_prompts, **self.generate_kwargs)
                 ):

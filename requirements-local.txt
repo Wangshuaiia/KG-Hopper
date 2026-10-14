@@ -1,0 +1,13 @@
+# Laptop / CPU / Apple MPS: kghopper data building, SFT, GRPO, evaluation, KG and reward servers.
+torch
+transformers>=4.46,<5
+accelerate
+peft
+anthropic
+pydantic>=2
+fastapi
+uvicorn
+pyyaml
+requests
+pytest
+rdflib  # tests: in-process SPARQL endpoint for the Freebase backend

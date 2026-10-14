@@ -1,0 +1,85 @@
+# GPU setup following the paper (Sec. IV-B). Used by the KG server, the reward server and
+# evaluation in the OpenRLHF pipeline (scripts/reinforce_train.sh); RL hyperparameters for
+# OpenRLHF itself are the variables at the top of that script.
+seed: 0
+
+model:
+  policy: Qwen/Qwen2.5-7B              # or meta-llama/Llama-3.1-8B-Instruct
+  dtype: bfloat16
+  device: auto
+
+kg:
+  backend: http                        # trainer/evaluator talk to kghopper.kg.server ...
+  url: http://127.0.0.1:5005
+  server_backend: claude_sim           # ... which serves: claude_sim | freebase_sparql (real Freebase)
+  sparql_url: http://localhost:8890/sparql   # for freebase_sparql; other options in local_freebase.yaml
+  cache_path: data/kg_cache/claude_freebase.json
+  claude_model: claude-opus-5-5
+  claude_effort: low
+  relation_selector: claude           # claude | openai | lexical
+  width: 3
+  max_objects_per_relation: 10
+  max_triples: 30
+  max_workers: 32
+
+rollout:
+  max_turns: 8
+  max_new_tokens_per_turn: 512
+  max_total_tokens: 8192
+
+reward:
+  mode: gated                          # gated | paper
+  w_answer: 1.0
+  format_bonus: 0.5
+  search_per_call: 0.5
+  search_cap: 0.8
+  answer_judge: openai                 # f_a: e.g. `vllm serve meta-llama/Llama-3.2-3B-Instruct --port 8001`
+  answer_judge_model: meta-llama/Llama-3.2-3B-Instruct
+  answer_judge_url: http://127.0.0.1:8001
+  answer_judge_rule_first: true       # exact/alias matches score 1 without asking the judge
+  reason_judge: openai                 # f_r: e.g. `vllm serve meta-llama/Llama-3.3-70B-Instruct --port 8002 -tp 4`
+  reason_judge_model: meta-llama/Llama-3.3-70B-Instruct
+  reason_judge_url: http://127.0.0.1:8002
+  max_answer_words: 15
+
+sft:                                   # cold start (paper III-B: 500 trajectories); the paper gives no SFT hyperparameters
+  data: data/train/sft.jsonl           # python -m kghopper.prepare_data sft (docs/DATA.md)
+  output_dir: checkpoints/sft
+  epochs: 3
+  max_steps: -1
+  lr: 1.0e-5
+  grad_accum: 8
+  grad_clip: 1.0
+  max_len: 8192
+  use_lora: false                      # full fine-tuning; set true (with lora below) to fit a single smaller GPU
+  lora: {r: 64, alpha: 128, dropout: 0.05}
+
+# RL. The paper's run is the multi-GPU OpenRLHF one: scripts/reinforce_train.sh carries its settings.
+# This section is the single-process alternative (python -m kghopper.train_grpo) with the same settings.
+grpo:
+  data: data/train/rl.jsonl            # 2,000 RL prompts
+  init_model: checkpoints/sft
+  output_dir: checkpoints/grpo
+  prompts_per_step: 16                 # batch size 16
+  n_samples_per_prompt: 16             # 16 rollouts per query
+  steps: 250                           # 2 epochs x 2,000 prompts / 16 per step
+  history_resampling_step: 126         # epoch 2 starts at step 2,000 / 16 + 1: one-hop questions dropped from here
+  advantage_estimator: group_norm      # GRPO
+  temperature: 1.0                     # rollout temperature 1
+  top_p: 1.0
+  lr: 1.0e-6                           # learning rate 1e-6
+  ppo_epochs: 1
+  clip_eps: 0.2                        # PPO clip ratio 0.2
+  kl_coef: 1.0e-5                      # KL penalty 1e-5 (k3)
+  grad_clip: 1.0
+  save_every: 25
+  use_lora: false
+  lora: {r: 64, alpha: 128, dropout: 0.0}
+
+eval:
+  model: checkpoints/grpo
+  datasets: [cwq, webqsp, webquestions, grailqa, qald, trex, zeroshotre, creak]
+  n: null
+  batch_size: 64
+  temperature: 0.0
+  output_dir: outputs/eval

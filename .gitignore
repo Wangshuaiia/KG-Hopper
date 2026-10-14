@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+checkpoints/
+outputs/
+logs/
+data/kg_cache/*.lock
+data/kg_cache/*.tmp
+# generated locally (build_data / claude_sim KG); not shipped
+data/synthetic/
+data/kg_cache/
+data/train/

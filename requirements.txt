@@ -20,3 +20,11 @@ wandb
 wheel
 vllm==0.6.5
 ninja
+# KG-Hopper core (kghopper) and services
+ray[default]
+anthropic
+pydantic>=2
+fastapi
+uvicorn
+pyyaml
+requests

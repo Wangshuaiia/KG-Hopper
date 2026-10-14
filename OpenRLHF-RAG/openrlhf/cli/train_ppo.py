@@ -129,7 +129,10 @@ def train(args):
         return_eval=False,
         train_split=args.prompt_split,
     )
-    kill
+    raise NotImplementedError(
+        "openrlhf.cli.train_ppo (without Ray/vLLM) is not supported by KG-Hopper; "
+        "use openrlhf.cli.train_ppo_ray via scripts/reinforce_train.sh, or python -m kghopper.train_grpo on one device"
+    )
     prompts_data = prompts_data.select(range(min(args.max_samples, len(prompts_data))))
     prompts_dataset = PromptDataset(prompts_data, tokenizer, strategy, input_template=args.input_template)
 

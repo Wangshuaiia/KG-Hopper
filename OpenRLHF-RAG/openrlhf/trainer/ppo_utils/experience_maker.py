@@ -1,61 +1,33 @@
+import os
+import random
+import sys
 import time
 from abc import ABC
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import List, Optional, Tuple, Union
-import random
-random.seed(42)
-#sht update
+
 import ray
 import torch
-from datasets import load_dataset
 import torch.nn as nn
 from tqdm import tqdm
-from datasets import Dataset
-import copy
-import requests
-import time
+
 from openrlhf.models.actor import Actor
 from openrlhf.models.utils import compute_approx_kl, compute_reward, masked_mean, unpacking_samples
 from openrlhf.utils.logging_utils import init_logger
 from openrlhf.utils.remote_rm_utils import remote_rm_fn, remote_rm_fn_ray
-import re
-from collections import defaultdict
+
+try:  # the shared KG-Hopper core (pip install -e . in the repo root)
+    import kghopper  # noqa: F401
+except ImportError:
+    sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), *[".."] * 4)))
+from kghopper import protocol
+from kghopper.generation import VLLMGenerator
+from kghopper.kg import HttpKG
+from kghopper.rollout import rollout
+
+random.seed(42)
 logger = init_logger(__name__)
-
-
-# new
-import json
-import requests
-from bs4 import BeautifulSoup
-import wikipediaapi
-from urllib.parse import unquote
-from urllib.request import urlopen
-from urllib.parse import urlparse
-import wikipedia
-from requests.exceptions import Timeout
-from tqdm import tqdm #这个没有
-import time
-import concurrent #这个没有
-from concurrent.futures import ThreadPoolExecutor
-import pdfplumber #这个没有
-from io import BytesIO
-import re
-import string
-from typing import Optional, Tuple
-#from nltk.tokenize import sent_tokenize #没有，但也没用上
-#import nltk #没有，但也没用上
-from typing import List
-
-import multiprocessing #没有
-from openai import OpenAI
-import sys
-import os
-from datasets import load_dataset
-import http.client
-from time import sleep
-from collections import defaultdict
-import random
 
 
 
@@ -439,7 +411,10 @@ class NaiveExperienceMaker(ABC):
         """
         Generate samples and return in batches.
         """
-        kill
+        raise NotImplementedError(
+            "KG-Hopper generates rollouts only through RemoteExperienceMaker with vLLM engines "
+            "(openrlhf.cli.train_ppo_ray with --vllm_num_engines >= 1); see scripts/reinforce_train.sh"
+        )
         assert not getattr(self, "packing_samples", False)
         args = self.strategy.args
         self.actor.eval()
@@ -467,7 +442,10 @@ class NaiveExperienceMaker(ABC):
         """
         Turn samples into experience by calculating logprobs, values, rewards, and kl divergence.
         """
-        kill
+        raise NotImplementedError(
+            "KG-Hopper generates rollouts only through RemoteExperienceMaker with vLLM engines "
+            "(openrlhf.cli.train_ppo_ray with --vllm_num_engines >= 1); see scripts/reinforce_train.sh"
+        )
         self.actor.eval()
         self.initial_model.eval()
         if self.reward_model is not None:
@@ -613,7 +591,10 @@ class NaiveExperienceMaker(ABC):
         - advantages: Tensor of shape (batch_size, response_size)
         - returns: Tensor of shape (batch_size, response_size)
         """
-        kill
+        raise NotImplementedError(
+            "--advantage_estimator gae is not supported: it does not apply the KG-output loss mask (retrieve_mask). "
+            "Use group_norm (GRPO), reinforce_baseline or rloo."
+        )
         if isinstance(values, list):
             # packing samples
             # TODO: this is slow...
@@ -900,6 +881,7 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
 
 
     def _generate_vllm(self, all_prompts: List[str], **kwargs) -> List[Samples]:
+        raise NotImplementedError("superseded by _generate_vllm_with_retrieve (rollouts with KG tool calls)")
         from vllm import SamplingParams
 
         # round-robin load balance
@@ -1054,286 +1036,88 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
         return samples_list
 
 
+    def _entity_ids_by_question(self):
+        """Topic-entity MIDs from the prompt file, passed to the KG tool as hints (prompts carry names only)."""
+        if not hasattr(self, "_entity_ids"):
+            self._entity_ids = {}
+            from kghopper.data import load_samples
+
+            for path in str(self.strategy.args.prompt_data).split(","):
+                try:
+                    for s in load_samples(path.strip()):
+                        if s.get("entity_ids"):
+                            self._entity_ids[s["question"]] = s["entity_ids"]
+                except Exception as e:  # e.g. an HF dataset name rather than a file
+                    logger.warning(f"no entity-id hints from {path}: {e}")
+        return self._entity_ids
+
     def _generate_vllm_with_retrieve(self, all_prompts: List[str], **kwargs) -> List[Samples]:
-        url_wiki = "http://0.0.0.0:5003/queries"
-        from vllm import SamplingParams
+        """Rollout with KG tool calls through the shared kghopper rollout (same code as evaluation).
+
+        The policy writes <search> entity </search>; the KG server (python -m kghopper.kg.server)
+        returns <searched_triples>. retrieve_mask is the rollout's token-level loss mask: 1 for
+        tokens the policy sampled, 0 for KG tool output (paper Sec. III-D), so no tag token ids
+        are hardcoded and sequences are the exact sampled tokens.
+        """
         rank = torch.distributed.get_rank()
         world_size = torch.distributed.get_world_size()
         if len(self.vllm_engines) <= world_size:
             llms = [self.vllm_engines[rank % len(self.vllm_engines)]]
         else:
             llms = self.vllm_engines[rank::world_size]
-
         args = self.strategy.args
+        if not self.packing_samples:
+            raise ValueError("KG rollout builds packed samples; run with --packing_samples")
 
-        sampling_params = SamplingParams(
-            temperature=kwargs.get("temperature", 1.0),
-            top_p=kwargs.get("top_p", 1.0),
-            top_k=kwargs.get("top_k", -1),
-            max_tokens=kwargs.get("max_new_tokens", 1024),
-            min_tokens=kwargs.get("min_new_tokens", 1),
-            skip_special_tokens=kwargs.get("skip_special_tokens", False),
-            include_stop_str_in_output=True,
-        )
-
-
-        all_prompts = sum([[prompt] * args.n_samples_per_prompt for prompt in all_prompts], [])
-        prompts_w_idx_dict = []
+        entity_ids = self._entity_ids_by_question()
+        samples_in = []
         for idx_w_prompt in all_prompts:
-            idx, prompt = idx_w_prompt.split("<|idx_prompt_split|>")
-            prompts_w_idx_dict.append({"idx": idx, "prompt": prompt})
-        # 从这里开始加检索功能
-        # all_prompt_token_ids = self.tokenize_fn(all_prompts, self.prompt_max_len, padding=False)["input_ids"]
-        stop_tokens = ["<|end_of_query|>"]
-        batch_size = (len(prompts_w_idx_dict) + len(llms) - 1) // len(llms)
-        # print("llms-len:",len(llms))
-        all_outputs = []
-        for i, llm in enumerate(llms): # 每个llm都执行若干group推理(每个gruop要进行多次rollout)
+            idx, prompt = idx_w_prompt.split("<|idx_prompt_split|>", 1)
+            question, topics, task = protocol.parse_prompt(prompt)
+            samples_in += [{"idx": idx, "question": question, "topic_entities": topics, "task": task,
+                            "entity_ids": entity_ids.get(question, {})}] * args.n_samples_per_prompt
 
-            idx_w_prompt_part = prompts_w_idx_dict[i * batch_size : (i + 1) * batch_size]
-            # print("idx_w_prompt_part:",idx_w_prompt_part)
-            data_keys = ["prompt" , "idx"]
-            ds = Dataset.from_dict({key: [d[key] for d in idx_w_prompt_part] for key in data_keys})
-            # print("ds:",ds)
-
-            finished_all_list=[]
-            continued_answer = copy.deepcopy(idx_w_prompt_part)
-
-            for t in range(11): # 每条都执行11次推理，目的就是推理出 完整的 solution，尽可能让需要检索的query全出现
-                finished_texts = []
-                continued_texts = []
-                sampling_params = SamplingParams(temperature=1, top_p=0.95, max_tokens=512, stop=stop_tokens)
-
-                outputs_ray = llm.generate.remote(ds['prompt'], sampling_params)
-                outputs = ray.get(outputs_ray)
-                query_list=[]
-                for q, output in enumerate(outputs):
-
-                    prompt = output.prompt
-                    idx = continued_answer[q]["idx"]
-                    stop_reason = output.outputs[0].stop_reason
-                    generated_text = output.outputs[0].text
-
-                    if "prompt_ids" not in continued_answer[q]:
-                        input_token_ids = list(output.prompt_token_ids)
-                    else:
-                        input_token_ids = continued_answer[q]["prompt_ids"]
-
-                    retrieve_num_count = continued_answer[q].get("retrieve_num_count",0)
-
-                    all_token_ids = list(output.prompt_token_ids) + list(output.outputs[0].token_ids)
-                    output_token_ids = all_token_ids[len(input_token_ids):]
-
-                    if t == 8: #检索次数太多了，直接停掉，就是未完成
-
-                        original_data = {
-                            "idx":idx,
-                            "prompt_ids":input_token_ids,
-                            "response_ids":output_token_ids,
-                            "retrieve_num_count" : retrieve_num_count
-                                }
-
-                        if original_data["response_ids"] == None:
-                            print(f"Here 1,Why this response_ids is None???,{original_data}")
-                            time.sleep(10)
-                        finished_texts.append(original_data)
-                        continue
-
-                    if "<|begin_of_query|>" in generated_text and stop_reason=="<|end_of_query|>":
-                        query = generated_text.split("<|begin_of_query|>")[-1].split("<|end_of_query|>")[0]
-                        query = query.replace('"',"").strip()
-                        query = " ".join(query.split())
-                        if query: #开始检索
-                            query_list.append(query)
-                            retrieve_num_count += 1
-                            original_data = {
-                                "idx":idx,
-                                "prompt":prompt + generated_text.strip(),
-                                "prompt_ids":input_token_ids,
-                                "response_ids":output_token_ids,
-                                "retrieve_num_count" : retrieve_num_count
-                                }
-                            if original_data["response_ids"] == None:
-                                print(f"Here 2,Why this response_ids is None???,{original_data}")
-                                time.sleep(10)
-                            continued_texts.append(original_data)
-                            # print("(1)ori-dict:",original_data)
-                        else: #这个是query没有按照规定格式的 ，直接停止了，之后可能需要优化
-                            original_data = {
-                            "idx":idx,
-                            "prompt_ids":input_token_ids,
-                            "response_ids":output_token_ids,
-                            "retrieve_num_count" : retrieve_num_count
-                                }
-                            if original_data["response_ids"] == None:
-                                print(f"Here 3,Why this response_ids is None???,{original_data}")
-                                time.sleep(10)
-                            finished_texts.append(original_data)
-                            # print("(2)ori-dict:",original_data)
-                    else: #生成结束
-                        original_data = {
-                        "idx":idx,
-                        "prompt_ids":input_token_ids,
-                        "response_ids":output_token_ids,
-                        "retrieve_num_count" : retrieve_num_count
-                        }
-                        finished_texts.append(original_data)
-                        if original_data["response_ids"] == None:
-                            print(f"Here 4,Why this response_ids is None???,{original_data}")
-                            time.sleep(10)
-                        # print("(3)ori-dict:",original_data)
-
-                assert len(query_list) == len(continued_texts), "Error in len of query_list and continued_texts"
-                # print("query-list:",query_list)
-                if len(query_list)!=0:
-                    topk = 3
-                    response = requests.post(url_wiki, json={"queries": query_list, "k": topk}) # query_list实际上是query的列表。其它的似乎无法传入列表，要改成循环
-                    if response.status_code == 200:
-                        result = response.json()
-                        answers = result["answers"]
-                        for k in range(len(answers)):
-                            retrieve_docs = answers[k] # answers[0]里包含topk个response。这里的k：第k个查询，第k个答案，一一对应
-                            continued_text_now = copy.deepcopy(continued_texts[k]) #这里为什么是index k
-                            if len(retrieve_docs)>0:
-                                doc_content_list = []
-                                for j in range(len(retrieve_docs)):
-                                    doc_now = re.sub(r'^\d+\s+', '', retrieve_docs[j])
-                                    doc_content_list.append(f"({j+1}){doc_now}\n")
-                                doc_content = ''.join(doc_content_list)
-                            else:
-                                doc_content = "None"
-
-
-                            continued_text_now["prompt"] = continued_text_now["prompt"] + "<|end_of_query|>\n\n"+ "<|begin_of_documents|>\n" +  doc_content + "<|end_of_documents|>\n\n"
-                            continued_texts[k] = continued_text_now
-                            # print("continued_text_now:",continued_text_now)
-                    else:
-                        raise Exception("Error in response: the status code is not 200!")
-
-                finished_all_list.extend(finished_texts)
-                if len(continued_texts)==0:
-                    if len(finished_all_list) != len(idx_w_prompt_part):
-                        time.sleep(20)
-                        print("finished_all_list:",finished_all_list)
-                        print("idx_w_prompt_part:",idx_w_prompt_part)
-                        time.sleep(20)
-                    assert len(finished_all_list) == len(idx_w_prompt_part) , "Error in len of finished_all_list and idx_w_prompt_part"
-                    all_outputs.append(finished_all_list)
-                    break
-                else:
-                    data_keys_again = continued_texts[0].keys()
-                    ds = Dataset.from_dict({key: [d[key] for d in continued_texts] for key in data_keys_again})
-                    continued_answer = copy.deepcopy(continued_texts)
-
-        all_outputs_cat = [item for sublist in all_outputs for item in sublist]
-        if len(all_outputs_cat) != len(prompts_w_idx_dict):
-            time.sleep(20)
-            print("[all_outputs_cat,prompts_w_idx_dict]:",[all_outputs_cat,prompts_w_idx_dict])
-            time.sleep(20)
-        assert len(all_outputs_cat) == len(prompts_w_idx_dict), "Error in len of all_outputs and prompts_w_idx_dict"
-        all_outputs_sorted = sorted(all_outputs_cat, key=lambda x: x['idx'])
+        rollout_cfg = {
+            "max_turns": args.max_turns,
+            "max_new_tokens_per_turn": args.max_new_tokens_per_turn,
+            "max_total_tokens": args.prompt_max_len + args.generate_max_len,
+        }
+        generator = VLLMGenerator(llms, self.tokenizer, remote=True)
+        trajs = rollout(generator, HttpKG(args.kg_url), samples_in, rollout_cfg,
+                        temperature=kwargs.get("temperature", args.temperature), top_p=kwargs.get("top_p", 1.0))
 
         samples_list = []
-        for i in range(0, len(all_outputs_sorted), args.micro_rollout_batch_size):
-            outputs = all_outputs_sorted[i : i + self.strategy.args.micro_rollout_batch_size]
-            if not self.packing_samples:
-                pass
-            else:
-                # NOTE: concat all outputs to following format:
-                #
-                # | token token token | token token [EOS] | token token token token token | token token [EOS] | token token | token token token [EOS] |
-                # |<---  prompt ----->|<---- answer ----->|<---------- prompt ----------->|<----- answer ---->|<- prompt -->|<-------- answer ------->|
-                pad_token_id, eos_token_id = self.tokenizer.pad_token_id, self.tokenizer.eos_token_id
-                sequences = []
-                packed_seq_lens = []
-                attention_mask = []
-                retrieve_mask=[]
-                num_actions = []
-
-                retrieve_num = []
-                pure_response_length_lis = []
-                for i, output in enumerate(outputs):
-                    try:
-                        input_len = len(output["prompt_ids"])
-                        output_len = len(output["response_ids"])
-                        packed_seq_lens.append(input_len + output_len)
-                        sequences.extend(output["prompt_ids"] + output["response_ids"])
-                        attention_mask.extend([i + 1] * (input_len + output_len))
-
-                        response_seq = output["response_ids"]
-                        retrieve_mask_now = [1] * len(response_seq)
-
-                        if output["prompt_ids"][0]==128000: #llama
-                            start_tokens = [27,     91,   7413,   3659,  77027,     91,    397]
-                            end_tokens = [ 408,   3659,  77027,     91,   1363]
-                        else: #qwen
-                            start_tokens = [27, 91, 7265, 3575, 75927, 91, 397] #<|begin_of_documents|>\n
-                            end_tokens = [408, 3575, 75927, 91, 1339] #end_of_documents|>\n\n
-
-                        is_in_masking = False
-                        mask_start_idx = -1
-                        start_count = 0
-                        end_count = 0
-                        for m in range(len(response_seq)):
-                            if retrieve_mask_now[m] == 0:
-                                continue
-                            if not is_in_masking and m + len(start_tokens) <= len(response_seq) and response_seq[m:m + len(start_tokens)] == start_tokens:
-                                start_count += 1  # 增加 start_tokens 计数
-                                is_in_masking = True
-                                mask_start_idx = m
-                                for n in range(mask_start_idx, mask_start_idx + len(start_tokens)):
-                                    retrieve_mask_now[n] = 0
-
-                            if is_in_masking:
-                                retrieve_mask_now[m] = 0
-                                if m + len(end_tokens) <= len(response_seq) and response_seq[m:m + len(end_tokens)] == end_tokens:
-                                    end_count += 1  # 增加 end_tokens 计数
-                                    is_in_masking = False  # 结束mask
-                                    for u in range(m, m + len(end_tokens)):
-                                        retrieve_mask_now[u] = 0
-                                    mask_start_idx = -1
-                        if start_count == end_count == output["retrieve_num_count"]:
-                            pass
-                        else:
-                            print(f"Important Bug!! Model genearte the retrieve symbols!! The num:{[start_count,end_count,output['retrieve_num_count']]},The detailed content:{output}")
-                            time.sleep(3)
-                            # assert start_count == end_count == output["retrieve_num_count"], "Model genearte the retrieve symbols"
-
-                        retrieve_mask.extend(retrieve_mask_now)
-                        num_actions.append(max(1, output_len))
-                        retrieve_num.append(output["retrieve_num_count"])
-                        pure_response_length_lis.append(sum(retrieve_mask_now))
-                    except Exception as e:
-                        print(f"Error occur:{e}, the data: {output},{output['prompt_ids']},{output['response_ids']}")
-
-
-                sequences = torch.tensor(sequences, device="cuda").unsqueeze(0)
-                attention_mask = torch.tensor(attention_mask, device="cuda").unsqueeze(0)
-                action_mask = None
-                retrieve_mask = torch.tensor(retrieve_mask, device="cuda").unsqueeze(0)
-
-                response_length = torch.tensor(num_actions, device="cuda", dtype=torch.float)
-                total_length = torch.tensor(packed_seq_lens, device="cuda", dtype=torch.float)
-
-                retrieve_nums = torch.tensor(retrieve_num, device="cuda", dtype=torch.float)
-                pure_response_length = torch.tensor(pure_response_length_lis, device="cuda", dtype=torch.float)
-
-                samples_list.append(
-                    Samples(
-                        sequences=sequences,
-                        attention_mask=attention_mask,
-                        action_mask=None,
-                        retrieve_mask = retrieve_mask,
-                        num_actions=num_actions,
-                        packed_seq_lens=packed_seq_lens,
-                        response_length=response_length,
-                        total_length=total_length,
-                        retrieve_num=retrieve_nums,
-                        pure_response_length=pure_response_length
-                    )
+        for i in range(0, len(trajs), args.micro_rollout_batch_size):
+            batch = trajs[i:i + args.micro_rollout_batch_size]
+            sequences, attention_mask, retrieve_mask = [], [], []
+            packed_seq_lens, num_actions, retrieve_num, pure_response_length = [], [], [], []
+            for j, t in enumerate(batch):
+                response_ids, loss_mask = t.response_ids, t.loss_mask
+                if not response_ids:  # keep shapes valid; nothing to train on
+                    response_ids, loss_mask = [self.tokenizer.eos_token_id], [0]
+                sequences.extend(t.prompt_ids + response_ids)
+                attention_mask.extend([j + 1] * (len(t.prompt_ids) + len(response_ids)))
+                packed_seq_lens.append(len(t.prompt_ids) + len(response_ids))
+                retrieve_mask.extend(loss_mask)
+                num_actions.append(len(response_ids))
+                retrieve_num.append(t.n_search)
+                pure_response_length.append(sum(loss_mask))
+            samples_list.append(
+                Samples(
+                    sequences=torch.tensor(sequences, device="cuda").unsqueeze(0),
+                    attention_mask=torch.tensor(attention_mask, device="cuda").unsqueeze(0),
+                    action_mask=None,
+                    retrieve_mask=torch.tensor(retrieve_mask, device="cuda").unsqueeze(0),
+                    num_actions=num_actions,
+                    packed_seq_lens=packed_seq_lens,
+                    response_length=torch.tensor(num_actions, device="cuda", dtype=torch.float),
+                    total_length=torch.tensor(packed_seq_lens, device="cuda", dtype=torch.float),
+                    retrieve_num=torch.tensor(retrieve_num, device="cuda", dtype=torch.float),
+                    pure_response_length=torch.tensor(pure_response_length, device="cuda", dtype=torch.float),
                 )
-
+            )
         return samples_list
+
     def flush(self):
         "Ensure all experience has been send to critic"
         if self.critic is not None:

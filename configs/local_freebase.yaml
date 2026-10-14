@@ -1,0 +1,20 @@
+# Same as local_cpu.yaml, but the KG tool queries a real Freebase SPARQL endpoint instead of the
+# Claude simulation. Point sparql_url at your server, e.g. a Virtuoso instance loaded with the
+# Freebase dump (see README, "Connecting a real Freebase"). Override on the command line with
+#   --set kg.sparql_url=http://my-host:8890/sparql
+base: local_cpu.yaml
+
+kg:
+  backend: freebase_sparql
+  sparql_url: http://localhost:8890/sparql   # <- your Freebase SPARQL endpoint
+  sparql_timeout: 60                         # seconds per query
+  sparql_method: post                        # post | get
+  language: en                               # language of names and literals
+  expand_cvt: true                           # follow unnamed CVT nodes: "r1 -> r2"
+  entity_lookup: degree                      # name -> MID when names collide: degree (most edges) | first
+  max_relations: 1000                        # stage 1 limit per entity
+  exclude_relation_prefixes: [type., common., freebase., kg., dataworld., user.]
+  relation_selector: lexical                 # stage 2: lexical (no API) | claude | openai
+  selector_url: null                         # for openai: e.g. http://127.0.0.1:8003 (vllm serve <model>)
+  selector_model: null
+  cache_path: data/kg_cache/freebase_selection.json   # caches relation selections

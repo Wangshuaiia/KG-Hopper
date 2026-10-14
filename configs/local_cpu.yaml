@@ -1,0 +1,86 @@
+# Smoke-test configuration: Qwen2.5-0.5B on a laptop (CPU or Apple MPS), Freebase simulated by Claude.
+# Every value can be overridden on the command line, e.g.  --set grpo.lr=1e-6 kg.width=5
+seed: 0
+
+model:
+  policy: Qwen/Qwen2.5-0.5B-Instruct   # paper: Qwen2.5-7B / Llama-3.1-8B-Instruct
+  dtype: float32
+  device: auto                         # auto -> cuda, mps or cpu
+
+kg:                                    # the KG tool (paper Sec. III-A), shared by every stage
+  backend: claude_sim                  # claude_sim | static (cache only, offline) | freebase_sparql (see local_freebase.yaml) | http
+  url: http://127.0.0.1:5005           # used when backend: http
+  server_backend: claude_sim           # what kghopper.kg.server serves when this config says http
+  cache_path: data/kg_cache/claude_freebase.json
+  claude_model: claude-opus-5-5        # needs ANTHROPIC_API_KEY
+  claude_effort: low
+  relation_selector: claude            # stage 2: claude | openai (selector_url, selector_model) | lexical (no API)
+  width: 3                             # predicates kept per search
+  max_objects_per_relation: 10
+  max_triples: 30
+  max_workers: 8
+
+rollout:
+  max_turns: 6                         # generation rounds, i.e. at most max_turns - 1 searches before answering
+  max_new_tokens_per_turn: 256
+  max_total_tokens: 3072
+
+reward:                                # paper Sec. III-C; see kghopper/reward.py
+  mode: gated                          # gated (correct answers always outscore wrong ones) | paper
+  w_answer: 1.0
+  format_bonus: 0.5
+  search_per_call: 0.5
+  search_cap: 0.8
+  answer_judge: rule                   # rule | hf | openai   (paper: Llama-3.2-3B)
+  answer_judge_model: null
+  answer_judge_url: null
+  answer_judge_rule_first: true       # exact/alias matches score 1 without asking the judge
+  reason_judge: none                   # none | hf | openai   (paper: Llama-3.3-70B)
+  reason_judge_model: null
+  reason_judge_url: null
+  max_answer_words: 15
+
+build_data:
+  output_dir: data/synthetic
+  sft_fraction: 0.5                    # of the seed entities
+  rl_fraction: 0.25                    # the rest goes to the synthetic eval set
+
+sft:                                   # cold start (paper: 500 samples)
+  data: data/synthetic/sft.jsonl
+  output_dir: checkpoints/sft
+  epochs: 3
+  max_steps: -1
+  lr: 2.0e-4
+  grad_accum: 4
+  grad_clip: 1.0
+  max_len: 3072
+  use_lora: true
+  lora: {r: 16, alpha: 32, dropout: 0.05}
+
+grpo:                                  # paper: 2000 prompts, 16 rollouts, bs 16, lr 1e-6, kl 1e-5, 2 epochs
+  data: data/synthetic/rl.jsonl
+  init_model: checkpoints/sft
+  output_dir: checkpoints/grpo
+  steps: 2
+  prompts_per_step: 2
+  n_samples_per_prompt: 4
+  advantage_estimator: group_norm      # group_norm (GRPO) | group_mean
+  temperature: 1.0
+  top_p: 1.0
+  lr: 1.0e-5
+  ppo_epochs: 1
+  clip_eps: 0.2
+  kl_coef: 0.0
+  grad_clip: 1.0
+  save_every: 0
+  history_resampling_step: null        # paper III-D: from this step on, drop one-hop questions (samples with hops: 1)
+  use_lora: true
+  lora: {r: 16, alpha: 32, dropout: 0.0}
+
+eval:
+  model: checkpoints/grpo
+  datasets: [data/synthetic/eval.jsonl, cwq, webquestions]
+  n: 5                                 # samples per dataset; null for all
+  batch_size: 8
+  temperature: 0.0
+  output_dir: outputs/eval

@@ -1,40 +1,25 @@
+import os
+import sys
+
 from torch.utils.data import Dataset
 from tqdm import tqdm
 
-
-def preprocess_data(data, input_template=None, input_key="input", apply_chat_template=None) -> str:
-    if apply_chat_template:
-        question = data["question"]
-        idx = data["idx"]
-
-        messages_chat=[
-            {"role": "system","content": """You are a helpful assistant.
-Given a question, you should answer it by first thinking about the reasoning process in the mind and then providing the final answer.
-The output format of reasoning process and final answer are enclosed within <think> </think> and <answer> </answer> tags, respectively, i.e., "<think> reasoning process here </think>\n\n<answer> final answer here </answer>".
-During the thinking process, **you can perform searching for uncertain knowledge** if necessary with the format of "<|begin_of_query|> search query (only list keywords, such as **"keyword_1 keyword_2 ..."**)<|end_of_query|>". **A query must involve only a single triple**.
-Then, the search system will provide you with the retrieval information with the format of "<|begin_of_documents|> ...search results... <|end_of_documents|>"."""},
-            {"role": "user", "content":question}
-        ]
+try:  # the shared KG-Hopper core (pip install -e . in the repo root)
+    import kghopper  # noqa: F401
+except ImportError:
+    sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..")))
+from kghopper import protocol
 
 
-        prompt = apply_chat_template(messages_chat, tokenize=False, add_generation_prompt=True) + "<think>"
+def preprocess_data(data, input_template=None, input_key="question", apply_chat_template=None) -> str:
+    """Prompt from a kghopper sample ({"idx", "question", "topic_entities", "task", ...}).
 
-    else:
-
-        base_prompt = """The User asks a question, and the Assistant solves it.
-The Assistant first thinks about the reasoning process in the mind and then provides the User with the final answer.
-The output format of reasoning process and final answer are enclosed within <think> </think> and <answer> </answer> tags, respectively, i.e., "<think> reasoning process here </think>\n\n<answer> final answer here </answer>".
-During the thinking process, **the Assistant can perform searching** for uncertain knowledge if necessary with the format of "<|begin_of_query|> search query (only list keywords, such as **"keyword_1 keyword_2 ..."**)<|end_of_query|>". **A query must involve only a single triple**.
-Then, the search system will provide the Assistant with the retrieval information with the format of "<|begin_of_documents|> ...search results... <|end_of_documents|>".
-
-User:{question}
-Assistant: <think>"""
-
-        question = data["question"]
-        idx = data["idx"]
-        prompt = base_prompt.format(question=question)
-
-    return str(idx) + "<|idx_prompt_split|>" + prompt
+    Training, evaluation and the reward server all build prompts with protocol.build_prompt,
+    so the chat template is not used here.
+    """
+    question = data[input_key or "question"]
+    prompt = protocol.build_prompt(question, data.get("topic_entities"), data.get("task") or "qa")
+    return str(data["idx"]) + "<|idx_prompt_split|>" + prompt
 
 
 class PromptDataset(Dataset):
@@ -57,26 +42,15 @@ class PromptDataset(Dataset):
         super().__init__()
         self.strategy = strategy
         self.tokenizer = tokenizer
-
-        # chat_template
         self.input_template = input_template
         input_key = getattr(self.strategy.args, "input_key", None)
-        apply_chat_template = getattr(self.strategy.args, "apply_chat_template", False)
-
-        if apply_chat_template:
-            apply_chat_template = self.tokenizer.apply_chat_template
 
         self.prompts = []
         for data in tqdm(dataset, desc="Preprocessing data", disable=not self.strategy.is_rank_0()):
-            prompt = preprocess_data(data, input_template, input_key, apply_chat_template)
-            self.prompts.append(prompt)
-        # print("len(self.prompts):",len(self.prompts))
-        # print("self.prompts[0:5]:",self.prompts[0:5])
-        # kill
+            self.prompts.append(preprocess_data(data, input_template, input_key))
 
     def __len__(self):
-        length = len(self.prompts)
-        return length
+        return len(self.prompts)
 
     def __getitem__(self, idx):
         return self.prompts[idx]

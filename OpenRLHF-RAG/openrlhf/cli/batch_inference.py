@@ -12,7 +12,7 @@ from openrlhf.datasets import PromptDataset, SFTDataset
 from openrlhf.models import Actor, get_llm_for_sequence_regression
 from openrlhf.utils import blending_datasets, get_processor, get_strategy, get_tokenizer
 
-kill
+
 def batch_generate_vllm(args):
     from vllm import LLM, SamplingParams
 
@@ -288,6 +288,10 @@ def batch_rm_inference(args):
 
 
 if __name__ == "__main__":
+    raise SystemExit(
+        "openrlhf.cli.batch_inference is not adapted to KG-Hopper (no KG tool calls); "
+        "use python evaluation/evaluate.py --backend vllm"
+    )
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--eval_task", type=str, default=None, help="Set to generate_vllm, generate (HF generate) or rm"

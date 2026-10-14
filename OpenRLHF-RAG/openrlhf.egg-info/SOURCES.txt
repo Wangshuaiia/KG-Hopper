@@ -12,9 +12,6 @@ openrlhf/cli/__init__.py
 openrlhf/cli/batch_inference.py
 openrlhf/cli/interactive_chat.py
 openrlhf/cli/serve_rm.py
-openrlhf/cli/server_dpsk_tuple.py
-openrlhf/cli/server_dpsk_tuple_check.py
-openrlhf/cli/server_rm_rag.py
 openrlhf/cli/train_dpo.py
 openrlhf/cli/train_kd.py
 openrlhf/cli/train_kto.py
@@ -45,7 +42,6 @@ openrlhf/trainer/prm_trainer.py
 openrlhf/trainer/rm_trainer.py
 openrlhf/trainer/sft_trainer.py
 openrlhf/trainer/ppo_utils/__init__.py
-openrlhf/trainer/ppo_utils/experience_maker.bak.py
 openrlhf/trainer/ppo_utils/experience_maker.py
 openrlhf/trainer/ppo_utils/experience_maker_rag.py
 openrlhf/trainer/ppo_utils/kl_controller.py

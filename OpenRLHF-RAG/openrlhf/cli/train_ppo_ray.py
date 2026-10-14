@@ -310,6 +310,12 @@ if __name__ == "__main__":
     parser.add_argument("--pretrain", type=str, default=None, help="HF model name or path")
     parser.add_argument("--reward_pretrain", type=str, default=None, help="HF model name or path")
     parser.add_argument("--remote_rm_url", type=str, default=None, help="remote RM API (HTTP)")
+    # KG-Hopper rollout (kghopper.rollout): KG tool server and per-trajectory limits
+    parser.add_argument("--kg_url", type=str, default="http://127.0.0.1:5005", help="python -m kghopper.kg.server")
+    parser.add_argument("--max_turns", type=int, default=6, help="generation rounds per trajectory (searches + answer)")
+    parser.add_argument("--max_new_tokens_per_turn", type=int, default=512)
+    parser.add_argument("--history_resampling_episode", type=int, default=None,
+                        help="paper III-D: from this (0-based) episode on, replace one-hop prompts (hops == 1) by multi-hop ones")
     parser.add_argument("--critic_pretrain", type=str, default=None, help="HF model name or path")
     parser.add_argument("--value_head_prefix", type=str, default="score")
     parser.add_argument("--ref_reward_offload", action="store_true", default=False)
